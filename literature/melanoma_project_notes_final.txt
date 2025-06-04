@@ -1,0 +1,34 @@
+I am a melanoma researcher and my latest project entails integrating all publicly available melanoma datasets for human and mouse, including both primary and metastatic tumors. I am primarily interested in scRNAseq and bulk RNAseq datasets, but later on, I also intend to integrate scATAC, spatial RNAseq and ChIPseq datasets, as well.
+
+focus on changes in stroma and immune system between distal metastases
+
+before and after immunotherapy, focusing on macrophages
+
+question about innate immunity that doesn't have memory. innate system has
+metabolic memory. in the more relevant studies, what happens in human in immune
+cells, like NK cells, macrophages, before and after therapy... make a small atlas
+and extrapolate different signatures. trained immune score that was developed. 
+
+CAR-monocyte therapy... expos monocytes to specific pathogens... put back in human patients
+
+be precise what we are checking. we can also look into spatial
+
+access to biobank to process for single cell from ffp samples.
+
+biopsy before and after immunotherapy. up to 6x patient samples.
+
+single cell in patient metastatis, cross-organ.
+
+
+[1] skin                              
+ [2] lymph_node                        
+ [3] fibroblast                        
+ [4] primary                           
+ [5] pleural_effusion                  
+ [6] haematopoietic_and_lymphoid_tissue
+ [7] lung                              
+ [8] central_nervous_system            
+ [9] uvea                              
+[10] liver                             
+[11] ascites                           
+[12] sinonasal 

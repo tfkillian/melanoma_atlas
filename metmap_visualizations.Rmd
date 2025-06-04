@@ -1,0 +1,247 @@
+---
+title: "MetMap Datasets"
+author: "Theo Killian"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, echo = FALSE, results = 'asis'}
+# Set global knitr options
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  warning  = FALSE,
+  message  = FALSE
+)
+
+# Load required packages
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(ggplot2)
+  library(ggrepel)
+  library(readxl)
+  library(writexl)
+  library(readr)
+  library(grid)
+  library(ggvenn)
+  library(ggforce)
+  library(scales)
+  library(tidyr)
+  # library(limma)
+  # library(pheatmap)
+  # library(RColorBrewer)
+  # library(biomaRt)
+  library(DT)
+})
+
+# set project name
+project_name <- "depmap_melanoma_limma"
+
+# Set seed for reproducibility
+set.seed(123)
+```
+
+<!-- ## Number of Depmap Datasets over time -->
+
+<!-- ## MultiAssay Experiment Demonstrating  -->
+
+<!-- ## Correlation of Primary and Metastatic Cell Lines -->
+
+## MetMap Visualizations 
+
+<!-- ```{r} -->
+<!-- Model <- read_csv("./data/Model.csv") -->
+<!-- View(Model) -->
+<!-- ``` -->
+
+```{r}
+read_excel("./data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>% 
+  dplyr::filter(cancer_type == "melanoma") %>%
+  as.data.frame() -> MetMap_melanoma_metadata
+# View(MetMap_melanoma_metadata)
+```
+
+## Read and Process MetMap Data
+
+<!-- Combine Sheets -->
+
+```{r warning=FALSE, message=FALSE}
+# Normalize organ placement around a circle (petals at fixed angles)
+# organ_positions <- data.frame(
+#   organ = c("brain", "lung", "liver", "bone", "kidney"),
+#   angle = seq(0, 2 * pi, length.out = 6)[1:5]  # 5 equally spaced directions
+# )
+
+sheet_names <- excel_sheets("./data/Supplementary Table 04 MetMap 500 met potential.xlsx")
+
+dplyr::bind_rows(
+  ## brain
+  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 1) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[1])),
+  ## lung
+  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 2) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[2])),
+  ## liver
+  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 3) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[3])),
+  ## bone
+  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 4) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[4])),
+  ## kidney
+  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 5) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[5]))) %>%
+  dplyr::filter(CCLE_name %in% MetMap_melanoma_metadata$CCLE_name) %>%
+  # dplyr::left_join(organ_positions, by = "organ") %>%
+  # dplyr::mutate(
+  #   x0 = 0,  # center x
+  #   y0 = 0,  # center y
+  #   a = CI.95 / 2,         # semi-major axis = length of petal
+  #   b = penetrance / 2,    # semi-minor axis = width of petal
+  #   angle = angle          # angle of petal orientation
+  # ) %>%
+  as.data.frame() -> metmap_combined
+
+# names(metmap_combined)
+# unique(metmap_combined$organ)
+
+DT::datatable(metmap_combined)
+```
+
+<!-- ```{r} -->
+<!-- Supplementary_Table_05_MetMap_125_met_potential <- read_excel("./data/Supplementary Table 05 MetMap 125 met potential.xlsx") -->
+<!-- View(Supplementary_Table_05_MetMap_125_met_potential) -->
+<!-- ``` -->
+
+```{r warning=FALSE, message=FALSE, fig.asp=1.2, fig.width=10, out.width="100%"} 
+##  fig.width=4, fig.height=12
+# metmap_combined %>%
+#   ggplot() +
+#     ggforce::geom_ellipse(
+#       aes(x0 = x0, y0 = y0, a = a, b = b, angle = angle, fill = organ),
+#       alpha = 0.7,
+#       color = "black"
+#     ) +
+#     coord_fixed() +
+#     facet_wrap(~CCLE_name, ncol = 5) +
+#     theme_minimal() +
+#     theme(
+#       strip.text = element_text(size = 6),
+#       panel.grid = element_blank(),
+#       axis.title = element_blank(),
+#       axis.text = element_blank(),
+#       axis.ticks = element_blank()
+#     ) +
+#     labs(title = "Petal plots of MetMap melanoma cell lines by metastatic organ",
+#          fill = "Organ")
+
+
+# Prepare angle mapping (equal spacing for the 5 organs)
+# organ_levels <- c("brain", "lung", "liver", "bone", "kidney")
+# metmap_combined %>% 
+#   dplyr::mutate(organ = factor(organ, levels = organ_levels)) %>%
+#   ggplot(aes(x = organ, y = CI.95, fill = organ)) +
+#   # geom_col(aes(width = penetrance), color = "black", alpha = 0.8) +
+#   coord_polar(start = 0) +
+#   facet_wrap(~CCLE_name, ncol = 5) +
+#   # theme_minimal() +
+#   theme(
+#     strip.text = element_text(size = 6),
+#     axis.title = element_blank(),
+#     axis.text.y = element_blank(),
+#     axis.text.x = element_text(size = 5),
+#     panel.grid = element_blank(),
+#     axis.ticks = element_blank()
+#   ) +
+#   labs(title = "Rose plots of MetMap melanoma cell lines by metastatic organ",
+#        fill = "Organ")
+
+# Ensure organ levels are ordered
+organ_levels <- c("brain", "lung", "liver", "bone", "kidney")
+
+# Normalize angles for organs around the circle using penetrance as angular width
+metmap_arc <- metmap_combined %>%
+  mutate(organ = factor(organ, levels = organ_levels)) %>%
+  group_by(CCLE_name) %>%
+  # Calculate cumulative angles per cell line
+  mutate(
+    total_penetrance = sum(penetrance),
+    fraction = penetrance / total_penetrance,
+    angle_width = 2 * pi * fraction,
+    angle_start = cumsum(lag(angle_width, default = 0)),
+    angle_end = angle_start + angle_width,
+    r0 = 0,
+    r = CI.95
+  ) %>%
+  ungroup()
+
+# Plot using geom_arc_bar
+ggplot(metmap_arc) +
+  geom_arc_bar(
+    aes(
+      x0 = 0, y0 = 0,
+      r0 = r0, r = r,
+      start = angle_start, end = angle_end,
+      fill = organ
+    ),
+    color = "black", alpha = 0.8
+  ) +
+  coord_fixed() +
+  facet_wrap(~CCLE_name, ncol = 5) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  labs(
+    title = "Rose plots of MetMap melanoma cell lines by metastatized organ",
+    fill = "Organ"
+  )
+```
+
+<!-- ### Venn Diagram -->
+
+<!-- Here, we plot a Venn diagram to illustrate if `stripped_cell_line_name` of the -->
+<!-- primary tumor samples overlaps with `stripped_cell_line_name` of the metastatic -->
+<!-- tumor samples. We observe that primary and metastatic tumors come from entirely -->
+<!-- different cell lines, given that no `stripped_cell_line_name` intersects between -->
+<!-- these two groups. -->
+
+<!-- ```{r warning=FALSE, message=FALSE} -->
+<!-- meta_data %>% -->
+<!--   dplyr::filter(primary_or_metastasis == "Metastasis") %>% -->
+<!--   as.data.frame() -> meta_tumors -->
+
+<!-- meta_data %>% -->
+<!--   dplyr::filter(primary_or_metastasis == "Primary") %>% -->
+<!--   as.data.frame() -> primary_tumors -->
+
+<!-- # Example input: named list of gene sets -->
+<!-- gene_sets <- list( -->
+<!--   `Metastatic Tumors` = meta_tumors$stripped_cell_line_name, -->
+<!--   `Primary Tumors` = primary_tumors$stripped_cell_line_name -->
+<!-- ) -->
+
+<!-- # Plot -->
+<!-- ggvenn(gene_sets, -->
+<!--        fill_color = c("skyblue", "pink", "lightgreen"), -->
+<!--        stroke_size = 0.5, set_name_size = 4) -->
+<!-- ``` -->
