@@ -1,0 +1,781 @@
+---
+title: "Depmap Melanoma Limma DE Gene Comparions (version 2)"
+author: "Theo Killian"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, echo = FALSE, results = 'asis'}
+# Set global knitr options
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  warning  = FALSE,
+  message  = FALSE
+)
+
+# Load required packages
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(ggplot2)
+  library(ggrepel)
+  library(readr)
+  library(readxl)
+  library(writexl)
+  library(limma)
+  library(edgeR)
+  library(biomaRt)
+  library(DT)
+  library(grid)
+  library(ggvenn)
+  # library(pheatmap)
+  # library(RColorBrewer)
+})
+
+# set project name
+project_name <- "depmap_melanoma_limma_v2"
+
+# Set seed for reproducibility
+set.seed(123)
+```
+
+# Introduction
+
+The report describes a [limma](https://bioconductor.org/packages/devel/bioc/html/limma.html)
+differential expression analysis of melanoma samples from the latest 24Q4
+[Depmap](https://depmap.org/portal/data_page/?tab=overview) bulk RNAseq gene
+expression data, and creates lists of DE genes between the average gene
+expression in primary tumor samples versus average gene expression in various
+metastatic organs (e.g. lung, liver, central nervous system, etc.).
+
+### Background
+
+Questions that we would like to answer with the Depmap RNAseq data:
+
+1) What is the difference between cell lines with tropism in liver versus lungs?
+1) Which are the top genes in each metastatic-colonized organ, based on the cell line status?
+1) Find genes unique in metastatic cell lines (for each metastatic organ) versus primary tumor cell lines?
+1) Can we identify gene regulatory networks specific for each organ and across organs? (to do later, in a following report)
+
+**NOTE: This report version uses "raw" gene counts and not TPM counts!**
+
+## Data Preparation
+
+We have pre-downloaded and semi-processed the Depmap melanoma metadata and bulk
+count matrix, which we load here:
+
+```{r eval=FALSE, warning=FALSE, message=FALSE}
+## latest count matrix
+readr::read_csv("./data/OmicsDefaultModelProfiles.csv") %>%
+  dplyr::rename_with(janitor::make_clean_names) %>%
+  dplyr::rename(depmap_id = model_id) %>%
+  dplyr::select(-profile_type) %>%
+  as.data.frame() -> map_depmap_id_to_patient_id
+
+## latest metadata, filter for melanoma datasets only
+readr::read_csv("./data/Model.csv") %>%
+  dplyr::rename(depmap_id = names(.)[1]) %>%
+  dplyr::select(-c(PatientSubtypeFeatures, TissueOrigin:PublicComments,
+                   PublicComments, HCMIID:COSMICID, contains("Source"))) %>%
+  dplyr::select(depmap_id, CCLEName, everything()) %>%
+  dplyr::rename_with(janitor::make_clean_names) %>%
+  dplyr::filter(grepl("Melanoma", oncotree_primary_disease)) %>%
+  as.data.frame() -> meta_data
+# View(meta_data)
+
+## latest count data
+readr::read_csv("./data/OmicsExpressionTranscriptsExpectedCountProfile.csv") %>%
+  dplyr::rename(profile_id = names(.)[1]) %>%
+  dplyr::left_join(map_depmap_id_to_patient_id, by = "profile_id") %>%
+  dplyr::filter(depmap_id %in% meta_data$depmap_id) %>%
+  dplyr::select(-profile_id) %>%
+  tidyr::pivot_longer(cols = -depmap_id,
+                      names_to = "gene_transcript",
+                      values_to = "count") %>%
+  dplyr::mutate(gene_name = stringr::str_extract(gene_transcript, "^[^\\s]+")) %>%
+  dplyr::group_by(depmap_id, gene_name) %>%
+  dplyr::summarise(count = sum(as.numeric(count)), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = gene_name, values_from = count) %>%
+  tibble::column_to_rownames("depmap_id") %>%
+  t() %>% as.data.frame() -> cts
+
+## make metadata consistent with count matrix
+meta_data %>%
+  dplyr::arrange(depmap_id) %>% 
+  dplyr::filter(depmap_id %in% colnames(cts)) -> meta_data2
+
+## save finished files
+saveRDS(meta_data2, file = "./data/new_depmap_melanoma_metadata.rds")
+saveRDS(cts, file = "./data/new_depmap_melanoma_counts.rds")
+```
+
+```{r warning=FALSE, message=FALSE}
+# read_excel("./data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>% 
+#   dplyr::filter(cancer_type == "melanoma") %>%
+#   dplyr::arrange(depmap_id) %>%
+#   as.data.frame() -> MetMap_melanoma_metadata
+
+## latest metadata
+readRDS(file = "./data/new_depmap_melanoma_metadata.rds") %>%
+  # dplyr::filter(depmap_id %in% MetMap_melanoma_metadata$depmap_id) %>% 
+  dplyr::mutate(across(primary_or_metastasis, ~ ifelse(is.na(.), "Unknown", .)),
+                met_site_group = factor(
+                  gsub(" ", "_",
+                       ifelse(primary_or_metastasis == "Primary",
+                              "primary", tolower(sample_collection_site))))) %>%
+  tibble::column_to_rownames(var = "depmap_id") %>%
+  as.data.frame() -> meta_data
+# dim(meta_data)
+
+## latest counts
+readRDS(file = "./data/new_depmap_melanoma_counts.rds") %>%
+  # dplyr::select(MetMap_melanoma_metadata$depmap_id) %>% 
+  as.data.frame() -> cts
+# dim(cts)
+
+## save the converted metadata table ( for Takis)
+# meta_data %>% 
+#   tibble::rownames_to_column(var = "depmap_id") %>%
+#   writexl::write_xlsx(path = "./data/depmap_melanoma_metadata_clean.xlsx")
+
+meta_data %>% 
+  DT::datatable()
+```
+
+Table breaking down sample organ distribution:
+
+```{r}
+table(meta_data$met_site_group)
+```
+
+## Preliminary Visualizations
+
+### Donut Plot 
+
+Visualization of number of metastatic samples by organ sample site:
+
+```{r warning=FALSE, message=FALSE}
+# Summarize counts
+meta_data %>%
+  dplyr::filter(primary_or_metastasis == "Metastatic") %>%
+  dplyr::count(sample_collection_site) %>%
+  dplyr::arrange(desc(sample_collection_site)) %>%
+  dplyr::mutate(prop = n / sum(n) * 100,
+                ypos = cumsum(prop) - 0.5 * prop) %>%
+  as.data.frame() -> df_counts
+
+# Create donut plot
+df_counts %>%
+  ggplot(aes(x = 2, y = prop, fill = sample_collection_site)) +
+    geom_bar(stat = "identity", width = 1, color = "black") +
+    coord_polar(theta = "y") +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    geom_text_repel(aes(x = 2.5, y = ypos, label = paste0(
+      sample_collection_site, "\n", round(prop, 1), "%")), color = "black", size = 4) +
+    ggtitle("Distribution of Sample Collection Sites (Metastatic Samples Only)") +
+    theme(plot.title = element_text(hjust = 0.5),
+          legend.position = "none")
+```
+
+### Bar Plot 
+
+Visualization of number of metastatic samples by organ sample site:
+
+```{r}
+meta_data %>%
+  dplyr::filter(primary_or_metastasis == "Metastatic") %>%
+  dplyr::count(sample_collection_site) %>%
+  as.data.frame() -> metadata_summary
+
+# Create bar plot
+metadata_summary %>%
+ggplot(aes(x = sample_collection_site, y = n, fill = sample_collection_site)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Distribution of Sample Collection Sites (Metastatic Samples Only)",
+    x = "Sample Type", y = "Count") +
+  theme_classic() +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+### Venn Diagram
+
+Here, we plot a Venn diagram to illustrate if `stripped_cell_line_name` (i.e.
+the unique identifier of each Depmap cell line) of the primary tumor samples
+overlaps with the `stripped_cell_line_name` of the metastatic tumor samples. We
+observe that primary and metastatic tumor samples in the Depmap data come from
+**entirely different cell lines**, given that no `stripped_cell_line_name`
+intersects between these two groups.
+
+```{r}
+list(
+  `Metastatic Tumors` = meta_data %>% 
+    dplyr::filter(primary_or_metastasis == "Metastatic") %>%
+    dplyr::pull(stripped_cell_line_name),
+  `Primary Tumors` = meta_data %>%
+    dplyr::filter(primary_or_metastasis == "Primary") %>%
+    dplyr::pull(stripped_cell_line_name)
+) -> gene_sets
+
+# Plot
+ggvenn(gene_sets,
+       fill_color = c("skyblue", "pink", "lightgreen"),
+       stroke_size = 0.5, set_name_size = 4)
+```
+
+### PCA
+
+**We do not observe good separation between class labels **
+
+```{r}
+# Step 1: Filter out lowly expressed genes
+# keep <- rowSums(cpm(cts) > 1) >= 5
+# cts_filtered <- cts[keep, ]
+min_samples <- ceiling(0.2 * nrow(meta_data))  # about 25 samples
+keep <- rowSums(cpm(cts) > 1) >= min_samples
+cts_filtered <- cts[keep, ]
+
+# Step 2: TMM normalization and log transformation
+dge <- DGEList(counts = cts_filtered)
+dge <- calcNormFactors(dge)
+logCPM <- cpm(dge, log = TRUE)
+
+# Step 3: PCA
+pca <- prcomp(t(logCPM), scale. = TRUE)  # transpose to make samples rows
+
+# Step 4: Build data frame for ggplot
+pca_df <- as.data.frame(pca$x)  # principal components
+pca_df$sample <- colnames(cts_filtered)
+
+# Step 5: Plot the PCA
+pca_df %>% 
+  tibble::rownames_to_column(var = "depmap_id") %>%
+  left_join(meta_data %>% tibble::rownames_to_column(var = "depmap_id"), by = "depmap_id") %>% 
+  # as.data.frame() -> a1
+  ggplot(aes(x = PC1, y = PC2, color = met_site_group, label = depmap_id)) +
+    geom_point(size = 2) +
+    geom_text(size = 2, vjust = -1) +
+    theme_minimal() +
+    labs(title = "PCA of logCPM-normalized expression",
+         x = paste0("PC1 (", round(summary(pca)$importance[2, 1] * 100, 1), "% variance)"),
+         y = paste0("PC2 (", round(summary(pca)$importance[2, 2] * 100, 1), "% variance)")) +
+    theme(legend.position = "right")
+```
+
+## Limma Expression Analysis
+
+**NOTE: "primary tumor" samples are the "normative" condition meaning that all genes with positive LFC are highter in this condition and genes with negative LFC are higher in the experimental conditions (e.g. lung).**
+
+### Create the design matrix
+
+```{r}
+## Step 1: filter out genes with all-zero counts
+# cts_filtered <- cts[rowSums(cts) > 0, ]
+# keep <- rowSums(cpm(cts) > 1) >= 5
+min_samples <- ceiling(0.2 * nrow(meta_data))  # about 25 samples
+keep <- rowSums(cpm(cts) > 1) >= min_samples
+cts_filtered <- cts[keep, ]
+dim(cts_filtered)
+```
+
+```{r}
+### Step 2: Create a DGEList object
+dge <- DGEList(counts = cts_filtered)
+
+# Optional: TMM normalization (especially if library sizes vary)
+dge <- calcNormFactors(dge)
+
+### Step 3: Create the design matrix
+design <- model.matrix(~ 0 + met_site_group, data = meta_data)
+colnames(design) <- levels(meta_data$met_site_group)
+
+### Step 4: Create contrast matrix
+contrast.matrix <- makeContrasts(
+  ## primary as normative
+  skin_vs_primary = skin - primary,
+  lung_vs_primary = lung - primary,
+  liver_vs_primary = liver - primary,
+  lymph_node_vs_primary = lymph_node - primary,
+  pleural_effusion_vs_primary = pleural_effusion - primary,
+  central_nervous_system_vs_primary = central_nervous_system - primary,
+  ascites_vs_primary = ascites - primary,
+  small_intestine_vs_primary = small_intestine - primary,
+  ## skin as normative
+  skin_vs_lung = lung - skin,
+  skin_vs_lung = liver - skin,
+  skin_vs_lung = lymph_node - skin,
+  skin_vs_lung = pleural_effusion - skin,
+  levels = design)
+```
+
+### Fit Model and Perform DEA
+
+```{r}
+### Step 5: Apply voom transformation (with mean-variance trend plot)
+v <- voom(dge, design, plot = TRUE)
+
+### Step 6: Fit the model and apply contrasts
+fit <- lmFit(v, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+```
+
+### Annotate DE Results
+
+We annotate the DE genes with Ensembl and Entrez IDs from Biomart.
+
+```{r eval=FALSE, warning=FALSE, message=FALSE}
+getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "external_gene_name"),
+      mart = useDataset("hsapiens_gene_ensembl", useMart("ensembl"))) %>%
+  dplyr::rename(ensembl_id = ensembl_gene_id,
+                entrez_id = entrezgene_id,
+                gene_name = external_gene_name) %>%
+  dplyr::filter(stringr::str_length(gene_name) > 1,
+                !duplicated(ensembl_id),
+                !duplicated(gene_name)) %>%
+  saveRDS(file = "./data/human_biomart.rds")
+```
+
+```{r}
+human_biomart <- readRDS(file = "./data/human_biomart.rds")
+
+# Extract top differentially expressed genes
+topTable(fit2, coef = "skin_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "skin") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> skin_de
+
+topTable(fit2, coef = "lung_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "lung") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> lung_de
+
+topTable(fit2, coef = "liver_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "liver") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> liver_de
+
+topTable(fit2, coef = "lymph_node_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "lymph_node") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> lymph_de
+
+topTable(fit2, coef = "pleural_effusion_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>% 
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "pleural_effusion") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> pe_de
+
+topTable(fit2, coef = "central_nervous_system_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "central_nervous_system") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> cns_de
+
+topTable(fit2, coef = "ascites_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>%
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "ascites") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> ascite_de
+
+topTable(fit2, coef = "small_intestine_vs_primary", adjust.method = "BH",
+         number = nrow(cts_filtered)) %>%
+  tibble::rownames_to_column(var = "gene_name") %>% 
+  dplyr::left_join(human_biomart, by = "gene_name") %>%
+  dplyr::left_join(
+    cts_filtered %>% 
+      tibble::rownames_to_column(var = "gene_name") %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        skin_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "small_intestine") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id))),
+        primary_mean_exp = mean(c_across(
+          meta_data %>%
+            dplyr::filter(met_site_group == "primary") %>%
+            tibble::rownames_to_column(var = "depmap_id") %>%
+            dplyr::pull(depmap_id)))) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(gene_name, contains("exp")),
+    by = "gene_name") %>%
+  dplyr::select(gene_name, contains("id"), everything()) -> si_de
+```
+
+### Results
+
+A Volcano plot (log2 fold change vs -log10 p-value) helps identify genes that
+display large magnitude changes and high significance.
+
+#### Primary Tumor vs Skin Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 1)
+```
+
+```{r warning=FALSE, message=FALSE}
+skin_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[1])))
+```
+
+#### Primary Tumor vs Lung Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 2)
+```
+
+```{r warning=FALSE, message=FALSE}
+lung_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, # max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[2])))
+```
+
+#### Primary Tumor vs Liver Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 3)
+```
+
+```{r warning=FALSE, message=FALSE}
+liver_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[3])))
+```
+
+#### Primary Tumor vs Lymph Node Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 4)
+```
+
+```{r warning=FALSE, message=FALSE}
+lymph_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[4])))
+```
+
+#### Primary Tumor vs Pleural Effusion Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 5)
+```
+
+```{r warning=FALSE, message=FALSE}
+pe_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[5])))
+```
+
+#### Primary Tumor vs Central Nervus System Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 6)
+```
+
+```{r warning=FALSE, message=FALSE}
+cns_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[6])))
+```
+
+#### Primary Tumor vs Ascite Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 7)
+```
+
+```{r warning=FALSE, message=FALSE}
+ascite_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[7])))
+```
+
+#### Primary Tumor vs Small Intestine Metastases
+
+```{r}
+limma::plotMA(fit2, coef = 8)
+```
+
+```{r warning=FALSE, message=FALSE}
+si_de %>%
+  dplyr::filter(!is.na(P.Value)) %>%
+  dplyr::mutate(
+    negLogP = -log10(P.Value),
+    sig = ifelse(adj.P.Val < 0.05 & abs(logFC) > 1,
+                 "Significant", "Not Significant")) -> volcano_data
+volcano_data %>%
+  ggplot(aes(x = logFC, y = negLogP, color = sig)) +
+  geom_point(size = 0.75, alpha = 0.75) +
+  geom_text_repel(data = subset(volcano_data, sig == "Significant"),
+                  aes(label = gene_name), size = 3, #max.overlaps = Inf,
+                  box.padding = 0.3, point.padding = 0.3, segment.color = "grey50") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  geom_hline(yintercept = -log10(0.05), color = "blue", linetype = "dashed") +
+  geom_vline(xintercept = c(-1, 1), color = "blue", linetype = "dashed") +
+  theme_bw() +
+  ggtitle(paste0("Volcano Plot ", gsub("_", " ", names(as.data.frame(contrast.matrix))[8])))
+```
+
+## Save Results
+
+We save the results as an RDS file and as Excel spreadsheet with a different DE
+gene list on each Excel sheet, with each sheet named according to that DE comparison.
+
+```{r warning=FALSE, message=FALSE}
+de_list <- list(
+  skin_de, lung_de, liver_de, lymph_de, pe_de, cns_de, ascite_de, si_de)
+
+names(de_list) <- c(
+  "skin_vs_primary_degs", "lung_vs_primary_degs", "liver_vs_primary_degs",
+  "lymph_node_vs_primary_degs", "pleural_effusion_vs_primary_degs",
+  "cns_vs_primary_degs", "ascite_vs_primary_degs", "small_intestine_vs_primary_degs")
+
+writexl::write_xlsx(x = de_list,
+                    path = paste0("./data/", project_name, "_", Sys.Date(), ".xlsx"))
+
+saveRDS(de_list, file = paste0("./data/", project_name, "_", Sys.Date(), ".rds"))
+```
+
+*Session Info*
+
+```{r sessionInfo}
+sessionInfo()
+```

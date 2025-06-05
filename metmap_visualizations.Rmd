@@ -1,5 +1,5 @@
 ---
-title: "MetMap Datasets"
+title: "Meta-analysis of MetMap Datasets"
 author: "Theo Killian"
 date: "`r Sys.Date()`"
 output:
@@ -32,7 +32,6 @@ suppressPackageStartupMessages({
   library(ggvenn)
   library(ggforce)
   library(scales)
-  library(tidyr)
   # library(limma)
   # library(pheatmap)
   # library(RColorBrewer)
@@ -41,7 +40,7 @@ suppressPackageStartupMessages({
 })
 
 # set project name
-project_name <- "depmap_melanoma_limma"
+project_name <- "metmap_melanoma_analysis"
 
 # Set seed for reproducibility
 set.seed(123)
