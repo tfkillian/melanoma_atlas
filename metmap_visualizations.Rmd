@@ -32,8 +32,12 @@ suppressPackageStartupMessages({
   library(ggvenn)
   library(ggforce)
   library(scales)
+  library(FSA)
+  library(pheatmap)
+  library(plotly)
+  library(ggpubr)
+  library(umap)
   # library(limma)
-  # library(pheatmap)
   # library(RColorBrewer)
   # library(biomaRt)
   library(DT)
@@ -46,29 +50,41 @@ project_name <- "metmap_melanoma_analysis"
 set.seed(123)
 ```
 
-<!-- ## Number of Depmap Datasets over time -->
+# Introduction
 
-<!-- ## MultiAssay Experiment Demonstrating  -->
+This report analyzes metastatic melanoma data from MetMap project, as published
+in ["A metastasis map of human cancer cell lines" by Jin, et al 2020.](https://www.nature.com/articles/s41586-020-2969-2),
+and is described in further detail on the [MetMap website](https://depmap.org/metmap/vis-app/index.html).
 
-<!-- ## Correlation of Primary and Metastatic Cell Lines -->
+The goals of this analysis are:
+1) Identify which cell lines have high/low metastatic potential to specific organs.
+1) Correlate metastatic potential (CI.95) with penetrance.
+1) Compare across organs and cell lines.
+1) Highlight patterns of multi-organ metastasis vs. organotropism.
 
-## MetMap Visualizations 
+<!-- ## TODO  -->
 
-<!-- ```{r} -->
-<!-- Model <- read_csv("./data/Model.csv") -->
-<!-- View(Model) -->
-<!-- ``` -->
-
-```{r}
-read_excel("./data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>% 
-  dplyr::filter(cancer_type == "melanoma") %>%
-  as.data.frame() -> MetMap_melanoma_metadata
-# View(MetMap_melanoma_metadata)
-```
+<!-- Label plots by organ or by tropism (where applicable.) -->
 
 ## Read and Process MetMap Data
 
-<!-- Combine Sheets -->
+The file `Supplementary Table 03 MetMap cell line annotation.xlsx`, which was
+downloaded from the [Metmap download page](https://depmap.org/metmap/data/index.html)
+contains the "metadata" describing all cell lines in this study. We will read
+this file here and select only the melanoma cell lines for further analysis.
+
+```{r}
+read_excel("./data/metmap_data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>%
+  dplyr::filter(cancer_type == "melanoma") %>%
+  as.data.frame() -> metmap_melanoma_metadata
+# View(metmap_melanoma_metadata)
+
+DT::datatable(metmap_melanoma_metadata)
+```
+
+We read the file `Supplementary Table 04 MetMap 500 met potential.xlsx`, which
+was downloaded from the [Metmap download page](https://depmap.org/metmap/data/index.html)
+and combine the different Excel sheets into a single dataframe:
 
 ```{r warning=FALSE, message=FALSE}
 # Normalize organ placement around a circle (petals at fixed angles)
@@ -77,35 +93,35 @@ read_excel("./data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>%
 #   angle = seq(0, 2 * pi, length.out = 6)[1:5]  # 5 equally spaced directions
 # )
 
-sheet_names <- excel_sheets("./data/Supplementary Table 04 MetMap 500 met potential.xlsx")
+sheet_names <- excel_sheets("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx")
 
 dplyr::bind_rows(
   ## brain
-  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
              sheet = 1) %>%
     dplyr::rename(CCLE_name = names(.)[1]) %>%
     dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[1])),
   ## lung
-  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
              sheet = 2) %>%
     dplyr::rename(CCLE_name = names(.)[1]) %>%
     dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[2])),
   ## liver
-  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
              sheet = 3) %>%
     dplyr::rename(CCLE_name = names(.)[1]) %>%
     dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[3])),
   ## bone
-  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
              sheet = 4) %>%
     dplyr::rename(CCLE_name = names(.)[1]) %>%
     dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[4])),
   ## kidney
-  read_excel("./data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
              sheet = 5) %>%
     dplyr::rename(CCLE_name = names(.)[1]) %>%
     dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[5]))) %>%
-  dplyr::filter(CCLE_name %in% MetMap_melanoma_metadata$CCLE_name) %>%
+  dplyr::filter(CCLE_name %in% metmap_melanoma_metadata$CCLE_name) %>%
   # dplyr::left_join(organ_positions, by = "organ") %>%
   # dplyr::mutate(
   #   x0 = 0,  # center x
@@ -116,78 +132,208 @@ dplyr::bind_rows(
   # ) %>%
   as.data.frame() -> metmap_combined
 
+## save the converted metadata table ( for Takis)
+metmap_combined %>%
+  dplyr::left_join(metmap_melanoma_metadata, by = "CCLE_name") %>%
+  dplyr::select(contains("name"), contains("id"), everything()) %>%
+  dplyr::select(-cancer_subtype) %>%
+  as_tibble() %>%
+  writexl::write_xlsx(path = "./data/metmap_melanoma_scores.xlsx")
+
 # names(metmap_combined)
 # unique(metmap_combined$organ)
 
 DT::datatable(metmap_combined)
 ```
 
-<!-- ```{r} -->
-<!-- Supplementary_Table_05_MetMap_125_met_potential <- read_excel("./data/Supplementary Table 05 MetMap 125 met potential.xlsx") -->
-<!-- View(Supplementary_Table_05_MetMap_125_met_potential) -->
-<!-- ``` -->
+## Visualizations 
+
+### Distribution of Metastatic Potential (CI.95) Across Organs
+
+```{r}
+metmap_combined %>%
+  ggplot(aes(x = organ, y = CI.95, fill = organ)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    theme_minimal() +
+    labs(
+      title = "Distribution of Metastatic Potential (CI.95) Across Organs",
+      x = "Organ",
+      y = "CI.95") +
+    theme(legend.position = "none")
+```
+
+### Distribution of Penetrance Across Organs
+
+```{r}
+metmap_combined %>%
+  ggplot(aes(x = organ, y = penetrance, fill = organ)) +
+    geom_boxplot() +
+    geom_jitter(width = 0.2, alpha = 0.5) +
+    theme_minimal() +
+    labs(
+      title = "Distribution of Penetrance Across Organs",
+      x = "Organ",
+      y = "Penetrance") +
+    theme(legend.position = "none")
+```
+
+### Waterfall Plot - Metastatic Potential (CI.95)
+
+```{r}
+metmap_combined %>% 
+  dplyr::arrange(desc(CI.95)) %>%
+  dplyr::mutate(rank = row_number()) %>% 
+  ggplot(aes(x = rank, y = CI.95, fill = organ)) +
+    geom_col() +
+    theme_classic() +
+    labs(title = "Waterfall Plot of Metastatic Potential (CI.95)", 
+         x = "Ranked Cell Line Samples", 
+         y = "CI.95 (Metastatic Potential)", 
+         fill = "Organ") +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank()) -> p1
+
+# plotly::ggplotly(p1)
+p1
+```
+
+### Waterfall Plot - Penetrance
+
+```{r}
+metmap_combined %>% 
+  dplyr::arrange(penetrance) %>%
+  dplyr::mutate(rank = row_number()) %>% 
+  ggplot(aes(x = rank, y = penetrance, fill = organ)) +
+    geom_col() +
+    theme_classic() +
+    labs(title = "Waterfall Plot of Penetrance",
+         x = "Ranked Cell Line Samples",
+         y = "Penetrance",
+         fill = "Organ") +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank()) -> p2
+
+# plotly::ggplotly(p2)
+p2
+```
+
+### Heatmap - Metastatic Potential (CI.95)
+
+```{r}
+metmap_combined %>% 
+  dplyr::select(CCLE_name, CI.95, organ) %>% 
+  tidyr::pivot_wider(
+    names_from = organ,
+    values_from = CI.95) %>%
+  tibble::column_to_rownames("CCLE_name") %>% 
+  as.data.frame() -> df_meta
+
+metmap_scaled1 <- t(scale(t(df_meta)))  # scale rows, not columns
+metmap_scaled1[is.nan(metmap_scaled1)] <- 0
+
+pheatmap(metmap_scaled1,
+         fontsize_row = 6,
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         main = "Z-scored CI.95 Metastatic Potential")
+```
+
+### Heatmap - Penetrance
+
+```{r}
+metmap_combined %>% 
+  dplyr::select(CCLE_name, penetrance, organ) %>% 
+  tidyr::pivot_wider(
+    names_from = organ,
+    values_from = penetrance) %>%
+  tibble::column_to_rownames("CCLE_name") %>% 
+  as.data.frame() -> df_pen
+
+metmap_scaled2 <- t(scale(t(df_pen)))  # scale rows, not columns
+metmap_scaled2[is.nan(metmap_scaled2)] <- 0
+
+pheatmap(metmap_scaled2,
+         fontsize_row = 6,
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         main = "Z-scored Penetrance")
+```
+
+### Correlation Between Metastatic Potential and Penetrance
+
+```{r warning=FALSE, message=FALSE}
+metmap_combined %>%
+  ggplot(aes(x = CI.95, y = penetrance, color = organ)) +
+    geom_point(alpha = 0.7) +
+    geom_vline(xintercept = -2, color = "red", linetype = "dashed") +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed") +
+    # facet_wrap(~ organ) +
+    theme_minimal() +
+    stat_cor(method = "spearman") +
+    labs(
+      title = "Correlation between Metastatic Potential (CI.95) and Penetrance",
+      x = "Metastatic Potential (CI.95)",
+      y = "Penetrance")
+```
+
+### Global Correlation Between Metastatic Potential and Penetrance
+
+```{r warning=FALSE, message=FALSE}
+metmap_combined %>%
+  ggplot(aes(x = CI.95, y = penetrance)) +
+    geom_point(alpha = 0.7) +
+    geom_vline(xintercept = -2, color = "red", linetype = "dashed") +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed") +
+    # facet_wrap(~ organ) +
+    theme_minimal() +
+    stat_cor(method = "spearman") +
+    labs(
+      title = "Correlation between Metastatic Potential (CI.95) and Penetrance",
+      x = "Metastatic Potential (CI.95)",
+      y = "Penetrance")
+```
+
+### Faceted Correlation Between Metastatic Potential and Penetrance
+
+Below we create faceted scatter plots with regression line for each organ. The
+vertical red dashed line at `Metastatic Potential = -2` represents where cell
+lines are considered "metastatic" or not.
+
+```{r warning=FALSE, message=FALSE}
+metmap_combined %>%
+  ggplot(aes(x = CI.95, y = penetrance, color = organ)) +
+    geom_point(alpha = 0.7) +
+    geom_vline(xintercept = -2, color = "red", linetype = "dashed") +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed") +
+    facet_wrap(~ organ) +
+    theme_minimal() +
+    stat_cor(method = "spearman", label.x = -4, label.y = 1.05, size = 3.5) +
+    labs(
+      title = "Correlation between Metastatic Potential (CI.95) and Penetrance",
+      x = "Metastatic Potential (CI.95)",
+      y = "Penetrance")
+```
+
+### Rose Plots
 
 ```{r warning=FALSE, message=FALSE, fig.asp=1.2, fig.width=10, out.width="100%"} 
-##  fig.width=4, fig.height=12
-# metmap_combined %>%
-#   ggplot() +
-#     ggforce::geom_ellipse(
-#       aes(x0 = x0, y0 = y0, a = a, b = b, angle = angle, fill = organ),
-#       alpha = 0.7,
-#       color = "black"
-#     ) +
-#     coord_fixed() +
-#     facet_wrap(~CCLE_name, ncol = 5) +
-#     theme_minimal() +
-#     theme(
-#       strip.text = element_text(size = 6),
-#       panel.grid = element_blank(),
-#       axis.title = element_blank(),
-#       axis.text = element_blank(),
-#       axis.ticks = element_blank()
-#     ) +
-#     labs(title = "Petal plots of MetMap melanoma cell lines by metastatic organ",
-#          fill = "Organ")
-
-
-# Prepare angle mapping (equal spacing for the 5 organs)
-# organ_levels <- c("brain", "lung", "liver", "bone", "kidney")
-# metmap_combined %>% 
-#   dplyr::mutate(organ = factor(organ, levels = organ_levels)) %>%
-#   ggplot(aes(x = organ, y = CI.95, fill = organ)) +
-#   # geom_col(aes(width = penetrance), color = "black", alpha = 0.8) +
-#   coord_polar(start = 0) +
-#   facet_wrap(~CCLE_name, ncol = 5) +
-#   # theme_minimal() +
-#   theme(
-#     strip.text = element_text(size = 6),
-#     axis.title = element_blank(),
-#     axis.text.y = element_blank(),
-#     axis.text.x = element_text(size = 5),
-#     panel.grid = element_blank(),
-#     axis.ticks = element_blank()
-#   ) +
-#   labs(title = "Rose plots of MetMap melanoma cell lines by metastatic organ",
-#        fill = "Organ")
-
 # Ensure organ levels are ordered
 organ_levels <- c("brain", "lung", "liver", "bone", "kidney")
 
 # Normalize angles for organs around the circle using penetrance as angular width
-metmap_arc <- metmap_combined %>%
-  mutate(organ = factor(organ, levels = organ_levels)) %>%
-  group_by(CCLE_name) %>%
+ metmap_combined %>%
+  dplyr::mutate(organ = factor(organ, levels = organ_levels)) %>%
+  dplyr::group_by(CCLE_name) %>%
   # Calculate cumulative angles per cell line
-  mutate(
+  dplyr::mutate(
     total_penetrance = sum(penetrance),
     fraction = penetrance / total_penetrance,
     angle_width = 2 * pi * fraction,
     angle_start = cumsum(lag(angle_width, default = 0)),
     angle_end = angle_start + angle_width,
     r0 = 0,
-    r = CI.95
-  ) %>%
-  ungroup()
+    r = CI.95) %>% ungroup() -> metmap_arc
 
 # Plot using geom_arc_bar
 ggplot(metmap_arc) +
@@ -196,10 +342,8 @@ ggplot(metmap_arc) +
       x0 = 0, y0 = 0,
       r0 = r0, r = r,
       start = angle_start, end = angle_end,
-      fill = organ
-    ),
-    color = "black", alpha = 0.8
-  ) +
+      fill = organ),
+    color = "black", alpha = 0.8) +
   coord_fixed() +
   facet_wrap(~CCLE_name, ncol = 5) +
   theme_minimal() +
@@ -208,39 +352,293 @@ ggplot(metmap_arc) +
     axis.title = element_blank(),
     axis.text = element_blank(),
     axis.ticks = element_blank(),
-    panel.grid = element_blank()
-  ) +
+    panel.grid = element_blank()) +
   labs(
     title = "Rose plots of MetMap melanoma cell lines by metastatized organ",
-    fill = "Organ"
-  )
+    fill = "Organ")
 ```
 
-<!-- ### Venn Diagram -->
+<!-- ```{r} -->
+<!-- ##  fig.width=4, fig.height=12 -->
+<!-- # metmap_combined %>% -->
+<!-- #   ggplot() + -->
+<!-- #     ggforce::geom_ellipse( -->
+<!-- #       aes(x0 = x0, y0 = y0, a = a, b = b, angle = angle, fill = organ), -->
+<!-- #       alpha = 0.7, -->
+<!-- #       color = "black" -->
+<!-- #     ) + -->
+<!-- #     coord_fixed() + -->
+<!-- #     facet_wrap(~CCLE_name, ncol = 5) + -->
+<!-- #     theme_minimal() + -->
+<!-- #     theme( -->
+<!-- #       strip.text = element_text(size = 6), -->
+<!-- #       panel.grid = element_blank(), -->
+<!-- #       axis.title = element_blank(), -->
+<!-- #       axis.text = element_blank(), -->
+<!-- #       axis.ticks = element_blank() -->
+<!-- #     ) + -->
+<!-- #     labs(title = "Petal plots of MetMap melanoma cell lines by metastatic organ", -->
+<!-- #          fill = "Organ") -->
 
-<!-- Here, we plot a Venn diagram to illustrate if `stripped_cell_line_name` of the -->
-<!-- primary tumor samples overlaps with `stripped_cell_line_name` of the metastatic -->
-<!-- tumor samples. We observe that primary and metastatic tumors come from entirely -->
-<!-- different cell lines, given that no `stripped_cell_line_name` intersects between -->
-<!-- these two groups. -->
+<!-- # Prepare angle mapping (equal spacing for the 5 organs) -->
+<!-- # organ_levels <- c("brain", "lung", "liver", "bone", "kidney") -->
+<!-- # metmap_combined %>%  -->
+<!-- #   dplyr::mutate(organ = factor(organ, levels = organ_levels)) %>% -->
+<!-- #   ggplot(aes(x = organ, y = CI.95, fill = organ)) + -->
+<!-- #   # geom_col(aes(width = penetrance), color = "black", alpha = 0.8) + -->
+<!-- #   coord_polar(start = 0) + -->
+<!-- #   facet_wrap(~CCLE_name, ncol = 5) + -->
+<!-- #   # theme_minimal() + -->
+<!-- #   theme( -->
+<!-- #     strip.text = element_text(size = 6), -->
+<!-- #     axis.title = element_blank(), -->
+<!-- #     axis.text.y = element_blank(), -->
+<!-- #     axis.text.x = element_text(size = 5), -->
+<!-- #     panel.grid = element_blank(), -->
+<!-- #     axis.ticks = element_blank() -->
+<!-- #   ) + -->
+<!-- #   labs(title = "Rose plots of MetMap melanoma cell lines by metastatic organ", -->
+<!-- #        fill = "Organ") -->
+<!-- ``` -->
 
-<!-- ```{r warning=FALSE, message=FALSE} -->
-<!-- meta_data %>% -->
-<!--   dplyr::filter(primary_or_metastasis == "Metastasis") %>% -->
-<!--   as.data.frame() -> meta_tumors -->
+### Clustering or Organ Tropism Classification
 
-<!-- meta_data %>% -->
-<!--   dplyr::filter(primary_or_metastasis == "Primary") %>% -->
-<!--   as.data.frame() -> primary_tumors -->
+    Test/Approach: Hierarchical clustering or UMAP
 
-<!-- # Example input: named list of gene sets -->
-<!-- gene_sets <- list( -->
-<!--   `Metastatic Tumors` = meta_tumors$stripped_cell_line_name, -->
-<!--   `Primary Tumors` = primary_tumors$stripped_cell_line_name -->
-<!-- ) -->
+    Purpose: Reveal whether certain cell lines cluster by metastatic behavior across organs.
 
-<!-- # Plot -->
-<!-- ggvenn(gene_sets, -->
-<!--        fill_color = c("skyblue", "pink", "lightgreen"), -->
-<!--        stroke_size = 0.5, set_name_size = 4) -->
+```{r}
+umap_result <- umap(metmap_scaled1)
+umap_df <- as.data.frame(umap_result$layout)
+umap_df$CCLE_name <- rownames(df_meta)
+ggplot(umap_df, aes(x = V1, y = V2, label = CCLE_name)) +
+  geom_point(alpha = 0.7) +
+    geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "UMAP of Cell Lines by Metastatic Potential",
+       x = "UMAP1", y = "UMAP2")
+```
+
+```{r}
+umap_result <- umap(metmap_scaled2)
+umap_df <- as.data.frame(umap_result$layout)
+umap_df$CCLE_name <- rownames(df_meta)
+ggplot(umap_df, aes(x = V1, y = V2, label = CCLE_name)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "UMAP of Cell Lines by Penetrance",
+       x = "UMAP1", y = "UMAP2")
+```
+
+```{r}
+rownames(metmap_scaled1) <- paste0("CI.95_", rownames(metmap_scaled1))
+rownames(metmap_scaled2)   <- paste0("pen_", rownames(metmap_scaled2))
+joint_matrix <- cbind(metmap_scaled1, metmap_scaled2)
+joint_scaled <- scale(joint_matrix)
+umap_result <- umap(joint_scaled)
+umap_df <- as.data.frame(umap_result$layout)
+umap_df$CCLE_name <- rownames(df_meta)
+ggplot(umap_df, aes(x = V1, y = V2, label = CCLE_name)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "Joint UMAP of Cell Lines by Penetrance and Metastatic Potential",
+       x = "UMAP1", y = "UMAP2")
+```
+
+### Multi-panel Strip Plot (or Dot Plot)
+
+    One panel per organ.
+
+    Y-axis: Cell lines (ordered by mean CI.95)
+
+    Dot size: Penetrance
+
+    Dot color: CI.95 gradient
+
+    Purpose: Identify organ-specific high-metastasizing cell lines.
+
+```{r warning=FALSE, message=FALSE}
+
+library(forcats)
+
+# Reorder CCLE_name within each organ by mean CI.95
+metmap_plotdata <- metmap_combined %>%
+  group_by(organ, CCLE_name) %>%
+  summarize(
+    CI.95 = mean(CI.95, na.rm = TRUE),
+    penetrance = mean(penetrance, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  group_by(organ) %>%
+  mutate(CCLE_name = fct_reorder(CCLE_name, CI.95))  # order within organ
+
+# Plot
+ggplot(metmap_plotdata, aes(x = 1, y = CCLE_name)) +
+  geom_point(aes(size = penetrance, color = CI.95)) +
+  facet_wrap(~ organ, scales = "free_y") +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  scale_size(range = c(1, 6)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_text(size = 5),
+    strip.text = element_text(face = "bold"),
+    panel.spacing = unit(1, "lines")
+  ) +
+  labs(
+    y = "Cell Line (ordered by CI.95)",
+    color = "Metastatic Potential (CI.95)",
+    size = "Penetrance",
+    title = "Organ-specific Metastasis Profiles of Melanoma Cell Lines"
+  ) -> p3
+
+plotly::ggplotly(p3)
+
+```
+
+## Statistical Tests
+
+We will run various statistical tests to determine the nature of the relationships between metastatic potential, penetrance and organ in melanoma cell lines. The following is a little background on the statistical tests that we will perform:
+
+1) Kruskal-Wallis Test (Global Non-Parametric Test)
+
+    Purpose: To test whether there is a statistically significant difference in the distribution of a continuous variable (like CI.95 or penetrance) across more than two independent groups (e.g., organs: brain, liver, lung, etc.).
+
+    Why use Kruskal-Wallis instead of ANOVA?
+
+        The variable (e.g., CI.95) is log-transformed and likely non-normally distributed.
+
+        Kruskal-Wallis is a non-parametric test and does not assume normality or equal variance.
+
+    What it tells you: At least one group differs from the others — but not which one(s).
+
+1) Dunn's Test (Post-hoc Pairwise Comparisons)
+
+    Purpose: To identify which specific pairs of groups differ after a Kruskal-Wallis test has found a significant global difference.
+
+    Why not use multiple Wilcoxon tests directly?
+
+    Running many pairwise tests inflates the Type I error rate (false positives).
+
+1) Bonferroni Correction (Control for Multiple Testing)
+
+    Why needed: We're doing multiple pairwise comparisons (e.g., brain vs. liver, brain vs. lung, etc.).
+
+    What it does: Adjusts the p-value threshold to keep the family-wise error rate controlled.
+
+    For example, if you do 10 tests, Bonferroni adjusts the significance threshold from 0.05 to 0.005.
+
+    Effect: More conservative (reduces false positives, may increase false negatives).
+
+### Global Spearman Correlation of Metastatic Potential and Penetrance
+
+```{r warning=FALSE}
+# Global correlation
+cor_test_global <- cor.test(metmap_combined$CI.95, metmap_combined$penetrance, method = "spearman")
+print(cor_test_global)
+```
+
+### Per-Organ Spearman Correlation of Metastatic Potential and Penetrance
+
+```{r warning=FALSE}
+cor_results_per_organ <- metmap_combined %>%
+  dplyr::group_by(organ) %>%
+  dplyr::summarize(
+    spearman_rho = cor(CI.95, penetrance, method = "spearman"),
+    p_value = cor.test(CI.95, penetrance, method = "spearman")$p.value)
+
+print(cor_results_per_organ)
+```
+
+### Comparing Metastatic Potential Between Organs
+
+    Test: Kruskal-Wallis test (non-parametric)
+
+    Why: CI.95 is continuous, log-transformed, and likely non-normal. We're comparing distributions across multiple organs.
+
+    Post-hoc: Dunn's test with Bonferroni correction.
+
+```{r warning=FALSE}
+# Kruskal-Wallis test for CI.95 across organs
+kruskal_result <- kruskal.test(CI.95 ~ organ, data = metmap_combined)
+print(kruskal_result)
+```
+
+```{r warning=FALSE}
+# Dunn's test with Bonferroni correction
+dunn_result <- dunnTest(CI.95 ~ organ, data = metmap_combined, method = "bonferroni")
+print(dunn_result)
+```
+
+### Penetrance Differences Between Organs
+
+    Test: Kruskal-Wallis or ANOVA (depending on distribution)
+
+    Alt: Chi-squared or Fisher's exact test if binarized penetrance (e.g. high ≥ 0.5, low < 0.5).
+    
+
+```{r warning=FALSE}
+# Kruskal-Wallis test across organs
+kruskal_penetrance <- kruskal.test(penetrance ~ organ, data = metmap_combined)
+print(kruskal_penetrance)
+```
+
+```{r warning=FALSE}
+# Dunn's test with Bonferroni correction
+dunn_result <- dunnTest(penetrance ~ organ, data = metmap_combined, method = "bonferroni")
+print(dunn_result)
+```
+
+
+*Session Info*
+
+```{r sessionInfo}
+sessionInfo()
+```
+
+<!-- ### Radar or Spider Plot (for presentations) -->
+
+<!--     Show metastasis profiles of a few key cell lines across all 5 organs. -->
+
+<!-- ### Binary Heatmap (Metastatic vs Non-metastatic) -->
+
+<!--     Define a threshold: CI.95 ≥ -2 and penetrance ≥ 0.5 as "positive." -->
+
+<!--     Show a simple 0/1 matrix for clean interpretation. -->
+
+<!-- ### Biological Interpretation Support -->
+
+<!--     Highlight known aggressive cell lines (e.g., A375, IGR37, etc.). -->
+
+<!--     Group cell lines by tissue of origin (e.g., primary vs. metastatic tumors). -->
+
+<!--     Tag well-characterized lines in figures. -->
+
+
+<!-- ## Miscellaneous Explanations -->
+
+<!-- ## Number of Depmap Datasets over time -->
+
+<!-- ## MultiAssay Experiment Demonstrating  -->
+
+<!-- ## Correlation of Primary and Metastatic Cell Lines -->
+
+<!-- ```{r} -->
+<!-- Model <- read_csv("./data/Model.csv") -->
+<!-- View(Model) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- readr::read_csv(file = "./data/metmap_data/GSE148283_all.sample.csv.gz") %>%  -->
+<!--   as.data.frame() -> meta_data_met -->
+<!-- View(meta_data_met) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- Supplementary_Table_05_MetMap_125_met_potential <- read_excel("./data/Supplementary Table 05 MetMap 125 met potential.xlsx") -->
+<!-- View(Supplementary_Table_05_MetMap_125_met_potential) -->
 <!-- ``` -->

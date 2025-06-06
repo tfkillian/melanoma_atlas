@@ -1,5 +1,5 @@
 ---
-title: "Depmap Melanoma Limma DE Gene Comparions (version 2)"
+title: "Depmap Melanoma Limma DE Analysis - Primary Comparison"
 author: "Theo Killian"
 date: "`r Sys.Date()`"
 output:
@@ -34,12 +34,12 @@ suppressPackageStartupMessages({
   library(DT)
   library(grid)
   library(ggvenn)
-  # library(pheatmap)
+  library(pheatmap)
   # library(RColorBrewer)
 })
 
 # set project name
-project_name <- "depmap_melanoma_limma_v2"
+project_name <- "depmap_melanoma_limma_primary"
 
 # Set seed for reproducibility
 set.seed(123)
@@ -51,19 +51,22 @@ The report describes a [limma](https://bioconductor.org/packages/devel/bioc/html
 differential expression analysis of melanoma samples from the latest 24Q4
 [Depmap](https://depmap.org/portal/data_page/?tab=overview) bulk RNAseq gene
 expression data, and creates lists of DE genes between the average gene
-expression in primary tumor samples versus average gene expression in various
-metastatic organs (e.g. lung, liver, central nervous system, etc.).
+expression in tumor samples, such as those derived from various organs colonized
+by melanoma metastases: (e.g. lung, liver, central nervous system, etc.).
+
+**NOTE:**
+**1) This report version uses "raw" gene counts and not TPM counts!**
+**1) All DE comparisons in this report are made relative to primary tumor (i.e. "primary").**
 
 ### Background
 
-Questions that we would like to answer with the Depmap RNAseq data:
+The main questions that we would like to answer with the Depmap RNAseq data are
+as follows:
 
-1) What is the difference between cell lines with tropism in liver versus lungs?
+1) What is the difference between cell lines with "tropism" in liver versus lungs?
 1) Which are the top genes in each metastatic-colonized organ, based on the cell line status?
 1) Find genes unique in metastatic cell lines (for each metastatic organ) versus primary tumor cell lines?
-1) Can we identify gene regulatory networks specific for each organ and across organs? (to do later, in a following report)
-
-**NOTE: This report version uses "raw" gene counts and not TPM counts!**
+1) Can we identify gene regulatory networks specific for each organ and across organs? (to do later, in a following report, perhaps using [SCENIC](https://scenic.aertslab.org/).)
 
 ## Data Preparation
 
@@ -115,6 +118,8 @@ saveRDS(meta_data2, file = "./data/new_depmap_melanoma_metadata.rds")
 saveRDS(cts, file = "./data/new_depmap_melanoma_counts.rds")
 ```
 
+Below is a table displaying the metadata for all melanoma samples in Depmap:
+
 ```{r warning=FALSE, message=FALSE}
 # read_excel("./data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>% 
 #   dplyr::filter(cancer_type == "melanoma") %>%
@@ -140,11 +145,11 @@ readRDS(file = "./data/new_depmap_melanoma_counts.rds") %>%
 # dim(cts)
 
 ## save the converted metadata table ( for Takis)
-# meta_data %>% 
-#   tibble::rownames_to_column(var = "depmap_id") %>%
-#   writexl::write_xlsx(path = "./data/depmap_melanoma_metadata_clean.xlsx")
+meta_data %>%
+  tibble::rownames_to_column(var = "depmap_id") %>%
+  writexl::write_xlsx(path = "./data/depmap_melanoma_metadata_clean.xlsx")
 
-meta_data %>% 
+meta_data %>%
   DT::datatable()
 ```
 
@@ -154,7 +159,21 @@ Table breaking down sample organ distribution:
 table(meta_data$met_site_group)
 ```
 
+### Filter Raw Counts
+
+```{r}
+## Step 1: filter out genes with all-zero counts
+# cts_filtered <- cts[rowSums(cts) > 0, ]
+# keep <- rowSums(cpm(cts) > 1) >= 5
+min_samples <- ceiling(0.2 * nrow(meta_data))  # about 25 samples
+keep <- rowSums(cpm(cts) > 1) >= min_samples
+cts_filtered <- cts[keep, ]
+dim(cts_filtered)
+```
+
 ## Preliminary Visualizations
+
+We display a few visualizations.
 
 ### Donut Plot 
 
@@ -231,17 +250,92 @@ ggvenn(gene_sets,
        stroke_size = 0.5, set_name_size = 4)
 ```
 
+### Raw Counts – Density Plot
+
+```{r}
+## Plot raw count density (log scale to visualize better)
+as.data.frame(cts) %>%
+  tibble::rownames_to_column("gene") %>%
+  tidyr::pivot_longer(-gene, names_to = "sample", values_to = "raw_count") %>%
+  ggplot(aes(x = raw_count + 1, group = sample)) +
+    geom_density(alpha = 0.3, color = "grey50") +
+    scale_x_log10() +
+    labs(title = "Density Plot of Raw Counts (Before Filtering)",
+         x = "Raw Counts (log10 scale)", y = "Density") +
+    theme_minimal()
+```
+
+### logCPM – Before Filtering
+
+```{r}
+## Calculate logCPM from raw counts before filtering
+dge_all <- DGEList(counts = cts)
+dge_all <- calcNormFactors(dge_all)
+logCPM_all <- cpm(dge_all, log = TRUE)
+
+## Convert to long format
+logCPM_long_all <- as.data.frame(logCPM_all) %>%
+  tibble::rownames_to_column("gene") %>%
+  tidyr::pivot_longer(-gene, names_to = "sample", values_to = "logCPM")
+
+## Density plot
+ggplot(logCPM_long_all, aes(x = logCPM, group = sample)) +
+  geom_density(alpha = 0.3, color = "grey40") +
+  labs(title = "logCPM Density (Before Filtering)", x = "log2(CPM)", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+## Optional: Boxplot
+ggplot(logCPM_long_all, aes(x = sample, y = logCPM)) +
+  geom_boxplot(outlier.size = 0.5) +
+  labs(title = "logCPM Distribution (Before Filtering)",
+       x = "Sample", y = "log2(CPM)") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+```
+
+### logCPM – After Filtering
+
+```{r}
+## Use filtered counts (already done in your code)
+dge_filt <- DGEList(counts = cts_filtered)
+dge_filt <- calcNormFactors(dge_filt)
+logCPM_filt <- cpm(dge_filt, log = TRUE)
+
+## Convert to long format
+logCPM_long_filt <- as.data.frame(logCPM_filt) %>%
+  tibble::rownames_to_column("gene") %>%
+  tidyr::pivot_longer(-gene, names_to = "sample", values_to = "logCPM")
+
+## Density plot
+ggplot(logCPM_long_filt, aes(x = logCPM, group = sample)) +
+  geom_density(alpha = 0.3, color = "darkblue") +
+  labs(title = "logCPM Density (After Filtering)", x = "log2(CPM)", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+## Optional: Boxplot
+ggplot(logCPM_long_filt, aes(x = sample, y = logCPM)) +
+  geom_boxplot(outlier.size = 0.5, fill = "lightblue") +
+  labs(title = "logCPM Distribution (After Filtering)",
+       x = "Sample", y = "log2(CPM)") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+```
+
 ### PCA
 
-**We do not observe good separation between class labels **
+**We do not observe good separation between class labels.**
 
 ```{r}
 # Step 1: Filter out lowly expressed genes
 # keep <- rowSums(cpm(cts) > 1) >= 5
 # cts_filtered <- cts[keep, ]
-min_samples <- ceiling(0.2 * nrow(meta_data))  # about 25 samples
-keep <- rowSums(cpm(cts) > 1) >= min_samples
-cts_filtered <- cts[keep, ]
+# min_samples <- ceiling(0.2 * nrow(meta_data))  # about 25 samples
+# keep <- rowSums(cpm(cts) > 1) >= min_samples
+# cts_filtered <- cts[keep, ]
 
 # Step 2: TMM normalization and log transformation
 dge <- DGEList(counts = cts_filtered)
@@ -258,8 +352,7 @@ pca_df$sample <- colnames(cts_filtered)
 # Step 5: Plot the PCA
 pca_df %>% 
   tibble::rownames_to_column(var = "depmap_id") %>%
-  left_join(meta_data %>% tibble::rownames_to_column(var = "depmap_id"), by = "depmap_id") %>% 
-  # as.data.frame() -> a1
+  left_join(meta_data %>% tibble::rownames_to_column(var = "depmap_id"), by = "depmap_id") %>%
   ggplot(aes(x = PC1, y = PC2, color = met_site_group, label = depmap_id)) +
     geom_point(size = 2) +
     geom_text(size = 2, vjust = -1) +
@@ -270,21 +363,35 @@ pca_df %>%
     theme(legend.position = "right")
 ```
 
+### Sample Correlation Heatmap
+
+Computes Pearson correlations between samples.
+
+```{r}
+cor_matrix <- cor(logCPM_filt, method = "pearson")
+
+annotation_col <- meta_data %>%
+  dplyr::select(met_site_group) %>%
+  as.data.frame()
+rownames(annotation_col) <- rownames(meta_data)
+
+# Basic correlation heatmap with annotation
+pheatmap(cor_matrix,
+         annotation_col = annotation_col,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         clustering_distance_rows = "correlation",
+         clustering_distance_cols = "correlation",
+         clustering_method = "complete",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Sample-Sample Correlation Heatmap (logCPM)")
+```
+
 ## Limma Expression Analysis
 
 **NOTE: "primary tumor" samples are the "normative" condition meaning that all genes with positive LFC are highter in this condition and genes with negative LFC are higher in the experimental conditions (e.g. lung).**
 
 ### Create the design matrix
-
-```{r}
-## Step 1: filter out genes with all-zero counts
-# cts_filtered <- cts[rowSums(cts) > 0, ]
-# keep <- rowSums(cpm(cts) > 1) >= 5
-min_samples <- ceiling(0.2 * nrow(meta_data))  # about 25 samples
-keep <- rowSums(cpm(cts) > 1) >= min_samples
-cts_filtered <- cts[keep, ]
-dim(cts_filtered)
-```
 
 ```{r}
 ### Step 2: Create a DGEList object
@@ -300,19 +407,30 @@ colnames(design) <- levels(meta_data$met_site_group)
 ### Step 4: Create contrast matrix
 contrast.matrix <- makeContrasts(
   ## primary as normative
-  skin_vs_primary = skin - primary,
-  lung_vs_primary = lung - primary,
-  liver_vs_primary = liver - primary,
-  lymph_node_vs_primary = lymph_node - primary,
-  pleural_effusion_vs_primary = pleural_effusion - primary,
-  central_nervous_system_vs_primary = central_nervous_system - primary,
-  ascites_vs_primary = ascites - primary,
-  small_intestine_vs_primary = small_intestine - primary,
+  primary_vs_skin                      = skin - primary,
+  primary_vs_lung                      = lung - primary,
+  primary_vs_liver                     = liver - primary,
+  primary_vs_lymph_node                = lymph_node - primary,
+  primary_vs_pleural_effusion          = pleural_effusion - primary,
+  primary_vs_central_nervous_system    = central_nervous_system - primary,
+  primary_vs_ascites                   = ascites - primary,
+  primary_vs_small_intestine           = small_intestine - primary,
   ## skin as normative
-  skin_vs_lung = lung - skin,
-  skin_vs_lung = liver - skin,
-  skin_vs_lung = lymph_node - skin,
-  skin_vs_lung = pleural_effusion - skin,
+  # skin_vs_lung                         = lung - skin,
+  # skin_vs_liver                        = liver - skin,
+  # skin_vs_lymph_node                   = lymph_node - skin,
+  # skin_vs_pleural_effusion             = pleural_effusion - skin,
+  # skin_vs_central_nervous_system       = central_nervous_system - skin,
+  # skin_vs_ascites                      = ascites - skin,
+  # skin_vs_small_intestine              = small_intestine - skin,
+  # ## lymph_node as normative
+  # lymph_node_vs_lung                   = lung - lymph_node,
+  # lymph_node_vs_liver                  = liver - lymph_node,
+  # lymph_node_vs_lymph_node             = lymph_node - lymph_node,
+  # lymph_node_vs_pleural_effusion       = pleural_effusion - lymph_node,
+  # lymph_node_vs_central_nervous_system = central_nervous_system - lymph_node,
+  # lymph_node_vs_ascites                = ascites - lymph_node,
+  # lymph_node_vs_small_intestine        = small_intestine - lymph_node,
   levels = design)
 ```
 
@@ -345,10 +463,11 @@ getBM(attributes = c("ensembl_gene_id", "entrezgene_id", "external_gene_name"),
 ```
 
 ```{r}
+## read the table that maps gene symbols to entrex and ensembl ids
 human_biomart <- readRDS(file = "./data/human_biomart.rds")
 
 # Extract top differentially expressed genes
-topTable(fit2, coef = "skin_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_skin", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -372,7 +491,7 @@ topTable(fit2, coef = "skin_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> skin_de
 
-topTable(fit2, coef = "lung_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_lung", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -396,7 +515,7 @@ topTable(fit2, coef = "lung_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> lung_de
 
-topTable(fit2, coef = "liver_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_liver", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -420,7 +539,7 @@ topTable(fit2, coef = "liver_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> liver_de
 
-topTable(fit2, coef = "lymph_node_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_lymph_node", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -444,7 +563,7 @@ topTable(fit2, coef = "lymph_node_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> lymph_de
 
-topTable(fit2, coef = "pleural_effusion_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_pleural_effusion", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>% 
@@ -468,7 +587,7 @@ topTable(fit2, coef = "pleural_effusion_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> pe_de
 
-topTable(fit2, coef = "central_nervous_system_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_central_nervous_system", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -492,7 +611,7 @@ topTable(fit2, coef = "central_nervous_system_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> cns_de
 
-topTable(fit2, coef = "ascites_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_ascites", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>%
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -516,7 +635,7 @@ topTable(fit2, coef = "ascites_vs_primary", adjust.method = "BH",
     by = "gene_name") %>%
   dplyr::select(gene_name, contains("id"), everything()) -> ascite_de
 
-topTable(fit2, coef = "small_intestine_vs_primary", adjust.method = "BH",
+topTable(fit2, coef = "primary_vs_small_intestine", adjust.method = "BH",
          number = nrow(cts_filtered)) %>%
   tibble::rownames_to_column(var = "gene_name") %>% 
   dplyr::left_join(human_biomart, by = "gene_name") %>%
@@ -760,17 +879,24 @@ We save the results as an RDS file and as Excel spreadsheet with a different DE
 gene list on each Excel sheet, with each sheet named according to that DE comparison.
 
 ```{r warning=FALSE, message=FALSE}
-de_list <- list(
-  skin_de, lung_de, liver_de, lymph_de, pe_de, cns_de, ascite_de, si_de)
+## make list
+de_list <- list(skin_de, lung_de, liver_de, lymph_de, pe_de, cns_de, ascite_de, si_de)
 
+## name list elements
 names(de_list) <- c(
-  "skin_vs_primary_degs", "lung_vs_primary_degs", "liver_vs_primary_degs",
-  "lymph_node_vs_primary_degs", "pleural_effusion_vs_primary_degs",
-  "cns_vs_primary_degs", "ascite_vs_primary_degs", "small_intestine_vs_primary_degs")
+  "primary_vs_skin_degs",
+  "primary_vs_lung_degs",
+  "primary_vs_liver_degs",
+  "primary_vs_lymph_node_degs",
+  "primary_vs_pleuraleffusion_degs",
+  "primary_vs_cns_degs",
+  "primary_vs_ascite_degs",
+  "primary_vs_smallintestine_degs")
 
-writexl::write_xlsx(x = de_list,
-                    path = paste0("./data/", project_name, "_", Sys.Date(), ".xlsx"))
+## write Excel
+write_xlsx(de_list, path = paste0("./data/", project_name, "_", Sys.Date(), ".xlsx"))
 
+## write RDS
 saveRDS(de_list, file = paste0("./data/", project_name, "_", Sys.Date(), ".rds"))
 ```
 
