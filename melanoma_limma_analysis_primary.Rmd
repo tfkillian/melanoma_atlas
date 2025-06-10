@@ -54,6 +54,10 @@ expression data, and creates lists of DE genes between the average gene
 expression in tumor samples, such as those derived from various organs colonized
 by melanoma metastases: (e.g. lung, liver, central nervous system, etc.).
 
+This analysis of the MetMap data is motivated by the following premise:
+
+*What are the gene programs the drive melanoma metastases?*
+
 **NOTE:**
 **1) This report version uses "raw" gene counts and not TPM counts!**
 **1) All DE comparisons in this report are made relative to primary tumor (i.e. "primary").**
@@ -68,7 +72,10 @@ as follows:
 1) Find genes unique in metastatic cell lines (for each metastatic organ) versus primary tumor cell lines?
 1) Can we identify gene regulatory networks specific for each organ and across organs? (to do later, in a following report, perhaps using [SCENIC](https://scenic.aertslab.org/).)
 
-For more about how the Depmap data was originally processed, please refer to the  [original Depmap paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC5667678/).
+For more about how the Depmap data was originally processed, please refer to these papers or web pages:
+1) [original Depmap paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC5667678/)
+1) [Depmap documentation page](https://depmap.sanger.ac.uk/documentation/datasets/expression/)
+1) [Depmap 24Q4 release statment](https://forum.depmap.org/t/announcing-the-24q2-release/3312)
 
 ## Data Preparation
 
