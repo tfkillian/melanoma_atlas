@@ -1,0 +1,472 @@
+---
+title: "MetMap Melanoma Cell Line Meta-Analysis"
+author: "Theo Killian"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, echo = FALSE, results = 'asis'}
+# Set global knitr options
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  warning  = FALSE,
+  message  = FALSE
+)
+
+# Load required packages
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(stringr)
+  library(ggplot2)
+  library(ggrepel)
+  library(readxl)
+  library(writexl)
+  library(readr)
+  library(grid)
+  library(ggvenn)
+  library(ggforce)
+  library(scales)
+  library(FSA)
+  library(pheatmap)
+  library(plotly)
+  library(ggpubr)
+  library(umap)
+  library(knitr)
+  library(RColorBrewer)
+  library(DT)
+  # library(limma)
+  # library(biomaRt)
+})
+
+# set project name
+project_name <- "metmap_melanoma_analysis"
+
+# Set seed for reproducibility
+set.seed(123)
+```
+
+# Introduction
+
+This reports attempts to replicate the statistical treatment of [Metmap](https://depmap.org/metmap/)
+PDAC Melanoma cell lines, as described in [PCSK9 drives sterol-dependent metastatic organ choice in pancreatic cancer, Radamaker, et al.   Nature 2025"](https://www.nature.com/articles/s41586-025-09017-8#Sec11), *but*
+**applied to melanoma cell lines instead.**
+
+### MetMap Feature Definitions
+
+Here is a short explanation of some of the features that we're about to dive into...
+
+**The definitions below were copied verbatim from the MetMap website.**
+
+* **Metastatic potential**
+
+DNA barcode abundance detected in each organ relative to the pre-injected population, presented on a log10 scale, range from -4 to 4.
+
+    <= -4: non-metastatic
+    -4~-2: (weakly) metastatic, but with low confidence
+    >= -2: metastatic, with higher confidence
+
+* **Penetrance**
+
+Percentage of animals that the cell lines were detected via barcode sequencing, ranges 0 to 1
+
+### PDAC MetMap Methods
+
+*Data corresponding to MetMap500 was downloaded from https://www.depmap.org/metmap/vis-app/index.html. MetMap500 provides both the metastatic potential (expressed as log10 mean value ranging from −4 to 4) and metastatic penetrance (expressed as a value between 0 and 1) for 498 human cancer cell lines following intracardiac injection and subsequent seeding in 5 metastatic organs (kidney, bone, lungs, brain, or liver). For each metastatic organ site the ‘mean’ values corresponding to the 30 PDAC cell lines used in the study was transformed to the original data. The relative metastatic potential (Metpot) and penetrance (Metpen) for each organ was calculated using the formula* [as described here](https://www.nature.com/articles/s41586-025-09017-8#Sec11)
+
+```{r warning=FALSE, message=FALSE}
+read_excel("./data/metmap_data/Supplementary Table 03 MetMap cell line annotation.xlsx") %>%
+  dplyr::filter(cancer_type == "melanoma") %>%
+  as.data.frame() -> metmap_melanoma_metadata
+
+## get sheet names
+sheet_names <- excel_sheets("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx")
+
+dplyr::bind_rows(
+  ## brain
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 1) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[1])),
+  ## lung
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 2) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[2])),
+  ## liver
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 3) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[3])),
+  ## bone
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 4) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[4])),
+  ## kidney
+  read_excel("./data/metmap_data/Supplementary Table 04 MetMap 500 met potential.xlsx",
+             sheet = 5) %>%
+    dplyr::rename(CCLE_name = names(.)[1]) %>%
+    dplyr::mutate(organ = gsub("metp500\\.", "", sheet_names[5]))) %>%
+  dplyr::filter(CCLE_name %in% metmap_melanoma_metadata$CCLE_name) %>%
+  as.data.frame() -> metmap_combined
+
+## merge metmap numerica and metadata into a single dataframe
+metmap_combined %>%
+  dplyr::left_join(metmap_melanoma_metadata, by = "CCLE_name") %>%
+  dplyr::mutate(mean_penetrance = mean(penetrance)) %>%
+  ungroup() %>%
+  dplyr::select(contains("name"), contains("id"), contains("CI."),
+                contains("penetrance"), everything()) %>%
+  dplyr::select(-cancer_subtype) %>%
+  as_tibble() -> metmap_ann
+
+## make tropic annotations
+metmap_ann %>%
+  dplyr::select(CCLE_name, penetrance, organ) %>% 
+  tidyr::pivot_wider(
+    names_from = organ,
+    values_from = penetrance) %>%
+  dplyr::mutate(
+    tropic_class = dplyr::case_when(
+     brain == 0 & lung == 0 & liver == 0 & bone == 0 & kidney == 0 ~ "non_metastatic",
+     brain > 0.4 & lung > 0.4 & liver > 0.4 & bone > 0.4 & kidney > 0.4 ~ "aggressive_metastatic",
+     brain > 0.5 & lung < 0.3 & liver < 0.3 & bone < 0.3 & kidney < 0.3 ~ "brain_tropic",
+     brain < 0.3 & lung > 0.5 & liver < 0.3 & bone < 0.3 & kidney < 0.3 ~ "lung_tropic",
+     brain < 0.3 & lung < 0.3 & liver > 0.5 & bone < 0.3 & kidney < 0.3 ~ "liver_tropic",
+     brain < 0.3 & lung < 0.3 & liver < 0.3 & bone > 0.5 & kidney < 0.3 ~ "bone_tropic",
+     brain < 0.3 & lung < 0.3 & liver < 0.3 & bone < 0.3 & kidney > 0.5 ~ "kidney_tropic",
+     brain < 0.215 & lung < 0.215 & liver < 0.215 & bone < 0.215 & kidney < 0.215 ~ "weak_metastatic",
+     CCLE_name %in% c(
+       "K029AX_SKIN", "IPC298_SKIN", "SKMEL24_SKIN", "SH4_SKIN") ~ "lung_tropic",
+     CCLE_name %in% c("A101D_SKIN", "UACC62_SKIN", "HS294T_SKIN") ~ "liver_tropic",
+     grepl("WM88_SKIN", CCLE_name) ~"lung_and_bone_metastatic",
+     grepl("WM1799_SKIN", CCLE_name) ~"liver_and_kidney_metastatic",
+          lung > 0.5 & liver > 0.5 ~ "liver_and_lung_metastatic",
+     TRUE ~ "broadly_metastatic")) %>% 
+  as.data.frame() -> tropic_ann
+
+## merge tropic annotations
+metmap_ann %>% 
+  dplyr::left_join(tropic_ann %>% dplyr::select(CCLE_name, tropic_class), by = "CCLE_name") %>% 
+  as.data.frame() -> metmap_merged
+
+## save the converted metadata table ( for Takis)
+# metmap_merged %>%
+#   writexl::write_xlsx(path = "./data/metmap_melanoma_merged_data.xlsx")
+# 
+# ## save as RDS
+# saveRDS(metmap_merged, file = "./data/metmap_melanoma_merged_data.rds")
+```
+
+### Clustering of Relative Normalized Penetrance and Metastatic Potential Values
+
+Since the "raw" MetMap data is essentially an Excel in "long format" we need to 
+convert the `CI.95` and `penetrance` values to square matrices, prior to
+performing clustering:
+
+```{r}
+metmap_merged %>% 
+  dplyr::filter(!duplicated(CCLE_name)) %>%
+  as.data.frame() -> metmap_anns
+
+metmap_merged %>% 
+  dplyr::select(CCLE_name, CI.95, organ) %>% 
+  tidyr::pivot_wider(
+    names_from = organ,
+    values_from = CI.95) %>%
+  # dplyr::mutate(CCLE_name = paste0(CCLE_name, "_potential")) %>%
+  as.data.frame() -> df_meta
+
+metmap_merged %>% 
+  dplyr::select(CCLE_name, penetrance, organ) %>% 
+  tidyr::pivot_wider(
+    names_from = organ,
+    values_from = penetrance) %>%
+  # dplyr::mutate(CCLE_name = paste0(CCLE_name, "_penetrance")) %>% 
+  as.data.frame() -> df_pen
+
+df_meta %>%
+  dplyr::mutate(across(c(brain, lung, liver, bone, kidney), ~ 10^.)) %>% ## unlog
+  # dplyr::filter(!(brain == lung & lung == liver & liver == bone & bone == kidney)#,
+  #               # !grepl("COLO800", CCLE_name)
+  #               ) %>%
+  rowwise() %>%
+  dplyr::mutate(
+    total = sum(c_across(c(brain, lung, liver, bone, kidney))),
+    brain = brain / total,
+    lung = lung / total,
+    liver = liver / total,
+    bone = bone / total,
+    kidney = kidney / total) %>%
+  dplyr::select(-total) %>%
+  dplyr::mutate(across(c(brain, lung, liver, bone, kidney), ~ log10(.))) %>%
+  ungroup() %>%  as.data.frame() -> df_meta_norm
+
+names(df_meta_norm)[2:6] <- paste0(names(df_meta_norm)[2:6], "_pot")
+
+df_pen %>%
+  dplyr::filter(!(brain == lung & lung == liver & liver == bone & bone == kidney)) %>%
+  rowwise() %>%
+  dplyr::mutate(
+    total = sum(c_across(c(brain, lung, liver, bone, kidney))),
+    brain = brain / total,
+    lung = lung / total,
+    liver = liver / total,
+    bone = bone / total,
+    kidney = kidney / total) %>%
+  dplyr::select(-total) %>%
+  ungroup() %>% as.data.frame() -> df_pen_norm
+
+names(df_pen_norm)[2:6] <- paste0(names(df_pen_norm)[2:6], "_pen")
+
+df_pen_norm %>%
+  # dplyr::bind_cols(df_meta_norm, df_pen_norm) %>%
+  dplyr::full_join(df_meta_norm, by = "CCLE_name") %>%
+  dplyr::mutate(across(c(contains("brain"), contains("lung"), contains("liver"),
+                         contains("bone"), contains("kidney")), ~ ifelse(is.na(.), 0, .))) %>%
+  tibble::column_to_rownames("CCLE_name") %>%
+  scale(center = TRUE, scale = TRUE) %>%
+  as.data.frame() -> joint_scaled
+
+# View(joint_scaled)
+# write_csv(x = df_meta, file = "./data/df_meta.csv")
+# write_csv(x = df_pen, file = "./data/df_pen.csv")
+```
+
+#### Relative Normalized Penetrance and Metastatic Potential Formula
+
+Formally, this means that each value is divided by the sum of values across all five organs (per row / cell line):
+
+$$
+{{\rm{Relative}}}_{P}=\frac{{P}_{{\rm{organ}}}}{{\sum }_{5}^{1}{P}_{{\rm{organs}}}}
+$$
+
+## 2D PCA
+
+Per the "Radamaker, et al. Nature 2025" paper, they said that they performed:
+*Scatter plot representing two principal components derived from principal component analysis of PDAC metastatic potential and penetrance data. Each point represents an individual PDAC cell line.*
+
+**We will perform the same, but for melanoma cell lines.**
+
+```{r warning=FALSE, message=FALSE}
+pca_result <- prcomp(joint_scaled, center = TRUE, scale. = TRUE)
+
+# Access principal components
+as.data.frame(pca_result$x) %>%
+  tibble::rownames_to_column(var = "CCLE_name") %>% 
+  # tibble::rownames_to_column(var = "combined_names") %>% 
+  # dplyr::mutate(CCLE_name = gsub("_[^_]*$", "", combined_names)) %>%
+  dplyr::left_join(metmap_anns, by = "CCLE_name") %>%
+  dplyr::mutate(age = as.integer(age)) %>%
+  as.data.frame() -> pca_scores
+```
+
+```{r}
+# pca_scores$CCLE_name <- rownames(df_meta)
+pca_scores %>% 
+  ggplot(aes(x = PC1, y = PC2, label = CCLE_name, color = tropic_class)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "PCA of Numeric Data",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+```{r}
+# pca_scores$CCLE_name <- rownames(df_meta)
+pca_scores %>% 
+  ggplot(aes(x = PC1, y = PC2, label = CCLE_name, color = gender)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "PCA of Numeric Data",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+```{r}
+# pca_scores$CCLE_name <- rownames(df_meta)
+pca_scores %>% 
+  ggplot(aes(x = PC1, y = PC2, label = CCLE_name, color = age)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "PCA of Numeric Data",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+```{r}
+# pca_scores$CCLE_name <- rownames(df_meta)
+pca_scores %>% 
+  ggplot(aes(x = PC1, y = PC2, label = CCLE_name, color = site_of_origin)) +
+  # ggplot(aes(x = PC1, y = PC2, label = CCLE_name, color = tropic_class)) +
+  geom_point(alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 50) +
+  theme_minimal() +
+  labs(title = "PCA of Numeric Data",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+### PCA Biplot
+
+```{r}
+# 4. Run PCA (scale if needed)
+prcomp(joint_scaled, scale. = TRUE) %>% biplot(cex = 0.6)
+```
+
+### 3D PCA
+
+```{r warning=FALSE, message=FALSE}
+pca_scores %>%
+  plotly::plot_ly(
+    x = ~PC1,
+    y = ~PC2,
+    z = ~PC3,
+    # color = ~tropic_class,
+    color = ~age,
+    # color = ~gender,
+    type = "scatter3d",
+    mode = "markers",
+    marker = list(size = 4)) %>%
+    layout(
+      title = "3D PCA Plot",
+      scene = list(
+        xaxis = list(title = "PC1"),
+        yaxis = list(title = "PC2"),
+        zaxis = list(title = "PC3")))
+```
+
+### Knee Plot of PCA Components
+
+```{r warning=FALSE, message=FALSE}
+#Calculate variance explained by each principal component
+std_devs <- pca_result$sdev
+var_explained <- std_devs^2 / sum(std_devs^2)
+
+# Create a data frame for the first 10 PCs
+data.frame(
+  PC = paste0("PC", 1:10),
+  VarianceExplained = var_explained[1:10],
+  Index = 1:10) %>%
+  ggplot(aes(x = factor(Index), y = VarianceExplained)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    xlab("Principal Component") +
+    ylab("Proportion of Variance Explained") +
+    ggtitle("Variance Explained by First 10 Principal Components") +
+    theme_minimal()
+```
+
+### PCA Summary
+
+```{r}
+# Summary of variance explained
+summary(pca_result)
+```
+
+### Heatmaps
+
+```{r}
+df_pen_norm %>%
+ tibble::column_to_rownames("CCLE_name") %>%
+ dplyr::mutate(across(everything(), ~ ifelse(is.nan(.), 0, .))) %>%
+  as.matrix() %>%
+  pheatmap(fontsize_row = 6,
+           cluster_rows = TRUE, 
+           cluster_cols = TRUE,
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           main = "Relative Normalized Penetrance Values")
+```
+
+```{r}
+df_meta_norm %>%
+  tibble::column_to_rownames("CCLE_name") %>%
+  dplyr::mutate(across(everything(), ~ ifelse(is.nan(.), 0, .))) %>%
+  as.matrix() %>%
+  pheatmap(fontsize_row = 6,
+           cluster_rows = TRUE, 
+           cluster_cols = TRUE,
+           color = colorRampPalette(c("blue", "white", "red"))(100),
+           main = "Relative Normalized Metastatic Potential Values")
+```
+
+### Petal Plots
+
+The following petal plots are an attempt to replicate the MetMap petal plots
+found on the "Data Exploration" page, but plotted using `ggplot2`.
+
+```{r warning=FALSE, message=FALSE, fig.asp=1.2, fig.width=10, out.width="100%"} 
+organ_levels <- c("brain", "lung", "liver", "bone", "kidney")
+n_organ <- length(organ_levels)
+
+# Angles at which each petal is centered
+angle_centers <- seq(0, 2 * pi - 2 * pi / n_organ, length.out = n_organ)
+
+petal_max_width <- 2 * pi / n_organ # Max width (no more than 1/5 of circle)
+petal_min_width <- 0 # petal_max_width * 0.1  # Set a minimum width for aesthetics
+
+metmap_merged %>%
+  dplyr::mutate(
+    organ = factor(organ, levels = organ_levels),
+    organ_index = as.integer(organ) - 1,
+    angle_center = angle_centers[organ_index + 1],   # R is 1-based
+    penetrance = pmax(penetrance, 0.001),
+    petal_width = petal_min_width + (petal_max_width - petal_min_width) * penetrance) %>%
+  dplyr::mutate(
+    angle_start = angle_center - petal_width / 2,
+    angle_end = angle_center + petal_width / 2,
+    r0 = 0,
+    scaled_r = rescale(CI.95, to = c(0, 1))) %>% 
+  ggplot() +
+  ggforce::geom_circle(aes(x0 = 0, y0 = 0, r = 1), color = "gray40",
+                       linetype = "dashed", inherit.aes = FALSE) +
+  geom_arc_bar(
+    aes(x0 = 0, y0 = 0,
+        r0 = r0, r = scaled_r,
+        start = angle_start, end = angle_end,
+        fill = organ), color = "black", alpha = 0.85) +
+  coord_fixed() +
+  facet_wrap(~CCLE_name, ncol = 5) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 8),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()) +
+  labs(title = "Rose plots of MetMap melanoma cell lines by metastatized organ",
+       fill = "Organ")
+```
+
+
+### Summary of the Article: "PCSK9 drives sterol-dependent metastatic organ choice in pancreatic cancer"
+
+This study identifies **PCSK9** as a key regulator of metastatic organotropism in pancreatic ductal adenocarcinoma (PDAC). PDAC commonly metastasizes to the **liver** and **lungs**, yet the molecular mechanisms dictating this organ preference were previously unclear.
+
+Using metastatic profiling of 25 human PDAC cell lines and in vivo models, the authors show that:
+- **PCSK9-low PDAC cells** preferentially colonize the **liver**, which is rich in LDL-cholesterol.
+- **PCSK9-high PDAC cells** preferentially metastasize to the **lungs**, where de novo cholesterol biosynthesis protects against ferroptosis.
+
+Mechanistically:
+- **Low PCSK9** levels promote **LDLR expression** and **cholesterol uptake**, activating lysosomal **mTORC1 signaling** and enabling growth in the liver.
+- These cells also convert cholesterol to **24(S)-hydroxycholesterol (24-HC)** via **CYP46A1**, which reprograms hepatocytes to release more cholesterol, creating a nutrient-rich microenvironment.
+- **High PCSK9** suppresses LDL uptake, forcing reliance on **endogenous cholesterol biosynthesis** and production of intermediates (e.g., 7-DHC) that protect from ferroptosis in the oxygen-rich lung.
+
+Functional experiments confirm:
+- **Overexpression of PCSK9** redirects liver-avid cells to grow in the lungs.
+- **Knockout of PCSK9** or overexpression of LDLR enables lung-avid cells to colonize the liver.
+- **CYP46A1** is necessary for liver-specific tumor growth through 24-HC-mediated conditioning of the hepatic niche.
+
+In patient samples:
+- Liver metastases were associated with **low PCSK9**, **high LDLR**, and **poor differentiation** (basal-like).
+- Lung metastases showed **high PCSK9**, **low LDLR**, and **well-differentiated**, classical subtype features.
+
+**Conclusion:** PCSK9 is a central molecular switch in PDAC metastasis, regulating cholesterol uptake versus synthesis, which in turn governs organ-specific colonization. Targeting PCSK9 or its downstream pathways offers a potential strategy to influence metastatic behavior and therapeutic vulnerability in PDAC.

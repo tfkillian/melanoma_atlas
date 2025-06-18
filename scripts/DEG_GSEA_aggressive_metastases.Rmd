@@ -1,0 +1,241 @@
+---
+title: "GO and KEGG Term Enrichment of DE Genes Between DepMap Primary Melanoma and MetMap Aggressive Metastases Samples"
+author: "Theo Killian"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r, echo = FALSE, results = 'asis'}
+# Set global knitr options
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  warning  = FALSE,
+  message  = FALSE
+)
+
+# Load required packages
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(stringr)
+  library(ggplot2)
+  library(org.Hs.eg.db)
+  library(clusterProfiler)
+  library(enrichplot)
+  library(pathview)
+  library(writexl)
+  library(DT)
+})
+
+# set project name
+project_name <- "metmap_aggressive_metastases"
+
+# Set seed for reproducibility
+set.seed(123)
+```
+
+# Introduction
+
+This analysis performs gene ontology enrichment analysis (GSEA) using
+[clusterProfiler](https://bioconductor.org/packages/release/bioc/html/clusterProfiler.html)
+on the list of DE genes and visualizes the enrichment of GO and KEGG gene sets
+found to be significant, and finally saving the results to Excel files.
+
+## Creation of ranked DE list
+
+The DE genes from the previous `DESeq2` analysis are read and filtered by the
+following criteria to create a ranked gene list:
+
+1) Genes with no gene symbol or Entrez ID, or duplicate IDs are removed
+1) Genes with no log fold change or p-value are removed
+1) The remaining genes by their Wald statistic (e.g. `stat`) from the DE analysis
+
+```{r warning=FALSE, message=FALSE}
+readRDS("./data/depmap_melanoma_limma_metmap_2025-06-13.rds")[[3]] %>%
+  dplyr::filter(
+    !is.na(gene_name),
+    !is.na(entrez_id),
+    !duplicated(gene_name),
+    !duplicated(entrez_id),
+    !is.na(logFC),
+    !is.na(P.Value)) %>%
+  dplyr::arrange(desc(t)) %>%
+  dplyr::select(entrez_id, t) %>%
+  dplyr::rename(ENTREZID = entrez_id) %>%
+  tibble::deframe() -> gene_list
+
+# Preview top entries
+head(gene_list, 20)
+```
+
+## Perform GSEA 
+
+GSEA is performed using the respective [clusterprofiler::gseGO](https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-go.html) and [clusterprofiler::gseKEGG](https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-kegg.html) functions to assay significant GO terms and KEGG pathways, using the following parameters:
+
+1) Only GO terms and KEGG pathways greater than *10 genes and less than 500 genes* are considered, in order to exclude gene sets that are either very large and very small, which may appear spuriously at the top of the GSEA results and hamper functional interpretation
+1) Benjamini-Hochberg p-value correction with *FDR = 0.05* is used
+1) GSEA is performed via [fgseaMultilevel](http://bioconductor.jp/packages/3.9/bioc/vignettes/fgsea/inst/doc/fgseaMultilevel-tutorial.html)
+
+```{r warning=FALSE, message=FALSE}
+gsea_go <- gseGO(
+    geneList = gene_list,
+    OrgDb = org.Hs.eg.db,
+    ont = "ALL",
+    keyType = "ENTREZID",
+    minGSSize = 10,
+    maxGSSize = 500,
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    by = "fgsea",
+    seed = TRUE,
+    verbose = TRUE)
+
+# shorten lengthy GO description names
+gsea_go_short <- gsea_go
+gsea_go_short@result$Description <- substr(gsea_go_short@result$Description, 1, 30)
+
+gsea_kegg <- gseKEGG(
+    geneList = gene_list,
+    organism = 'hsa',
+    minGSSize = 10,
+    maxGSSize = 500,
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    by = "fgsea",
+    seed = TRUE,
+    verbose = TRUE)
+
+# shorten lengthy KEGG description names
+gsea_kegg_short <- gsea_kegg
+gsea_kegg_short@result$Description <- substr(gsea_kegg_short@result$Description, 1, 30)
+```
+
+## Visualizations
+
+We generate dot plots, enrich plots and [pathview](https://bioconductor.org/packages/release/bioc/html/pathview.html) diagrams to help visualize the GSEA results.
+
+### Dot Plots
+
+Dot plots containing the top significant GO and KEGG terms are shown below, with
+some important caveats:
+
+* The color of the significant GO terms are all the same color if they have the same p-value.
+* GO and KEGG "Descriptions" were truncated to 30 characters on the y-axis for overall legibility, but the full names can be found in the result files
+* The `activated` and `suppressed` categories refer to the direction of enrichment, that is, whether a gene set is enriched in upregulated or downregulated genes based on the ranked list. This is relative to our DE comparison, therefore `activated` and `suppressed` is relative to the `"IgG"` condition, and vice versa (e.g. pathways and terms which are `supressed` are `activated`, relative to `PD1`).
+* `GeneRatio` refers to "the fraction of genes in the gene set that appear before the enrichment peak in the ranked gene list." More precisely: `GeneRatio = leadingEdge_size / geneSet_size`.
+
+```{r fig.height=5}
+dotplot(gsea_go_short, showCategory = 20, split=".sign") +
+  facet_grid(.~.sign) +
+  theme(axis.text.y = element_text(size = 8)) +
+  ggtitle("GSEA Significant GO Terms")
+```
+
+**NOTE: Personally, I've always observed many spurious GSEA KEGG results, (e.g. "Coronavirus disease", or "Huntinton's Disease", for example) so take these results with a "grain of salt."** 
+
+```{r fig.height=5}
+dotplot(gsea_kegg_short, showCategory = 20, split=".sign") +
+  facet_grid(.~.sign) +
+  theme(axis.text.y = element_text(size = 8)) +
+  ggtitle("GSEA Significant KEGG Pathways")
+```
+
+### Enrich plots
+
+```{r}
+# Enrichment plot for a specific gene set
+enrichplot::gseaplot2(gsea_go,
+                      geneSetID = "GO:0006955",
+                      title = "GO:0006955 Immune Response")
+```
+
+<!-- ```{r} -->
+<!-- enrichplot::gseaplot2(gsea_kegg, -->
+<!--                       geneSetID = "mmu05235", -->
+<!--                       title = "KEGG mmu05235: PD-L1 expression and PD-1 checkpoint pathway in cancer") -->
+<!-- ``` -->
+
+<!-- ### Pathview  -->
+
+<!-- [pathview](https://bioconductor.org/packages/release/bioc/html/pathview.html) is -->
+<!-- utilied to generate KEGG pathway diagrams for select pathways of interest. Below, -->
+<!-- we visualize the relative expression of genes within KEGG pathway [mmu05235](https://www.kegg.jp/entry/mmu05235): "PD-L1 expression and PD-1 checkpoint pathway in cancer," which may be particularly relevant to the research questions for this data.  -->
+
+<!-- ```{r eval=FALSE} -->
+<!-- ## https://www.kegg.jp/entry/mmu05235 -->
+<!-- hsa04110 <- pathview(gene.data  = gene_list, -->
+<!--                      pathway.id = "mmu05235", -->
+<!--                      species    = "mmu", -->
+<!--                      limit      = list(gene = max(abs(gene_list)), cpd = 1)) -->
+<!-- hsa04110 -->
+<!-- ``` -->
+
+<!-- ![pathview diagram for KEGG term mmu05235](pathview/mmu05235.pathview.png) -->
+
+## Tables of significant GO and KEGG terms
+
+We filter the GSEA GO and KEGG results to display only the significant terms in
+interactive tables.
+
+**NOTE: All GO and KEGG terms are still present in the final GSEA Excel result files; only the non-significant terms and pathways are removed here for reasons of space and convenience.**
+
+```{r warning=FALSE, message=FALSE}
+gsea_go@result %>% 
+  dplyr::arrange(p.adjust) %>% 
+  as.data.frame() -> gsea_go_res
+
+gsea_go_res %>%
+  dplyr::filter(p.adjust < 0.05) %>%
+  dplyr::mutate(enrichmentScore = signif(enrichmentScore, 3),
+                NES = signif(NES, 3),
+                pvalue = signif(pvalue, 3),
+                p.adjust = signif(p.adjust, 3),
+                qvalue = signif(qvalue, 3)) %>%
+  dplyr::select(-c(rank, leading_edge, core_enrichment)) %>%
+  as_tibble() %>%
+  DT::datatable()
+```
+
+```{r warning=FALSE, message=FALSE}
+gsea_kegg@result %>% 
+  dplyr::arrange(p.adjust) %>% 
+  as.data.frame() -> gsea_kegg_res
+
+gsea_kegg_res %>%
+  dplyr::filter(p.adjust < 0.05) %>%
+  dplyr::mutate(enrichmentScore = signif(enrichmentScore, 3),
+                NES = signif(NES, 3),
+                pvalue = signif(pvalue, 3),
+                p.adjust = signif(p.adjust, 3),
+                qvalue = signif(qvalue, 3)) %>%
+  dplyr::select(-c(rank, leading_edge, core_enrichment)) %>%
+  as_tibble() %>%
+  DT::datatable()
+```
+
+## Save results
+
+The unfiltered GSEA results are saved as `.rds` and `.xlsx` Excel files
+containing two sheets corresponding to the GO and KEGG terms from the respective
+GSEA analyses.
+
+```{r warning=FALSE, message=FALSE}
+gsea_res <- list(gsea_go_res, gsea_kegg_res)
+names(gsea_res) <- c("GO_GSEA_results", "KEGG_GSEA_results")
+write_xlsx(x = gsea_res, path = paste0(
+  "./results/", project_name, "_GSEA_results_", Sys.Date(), ".xlsx"))
+saveRDS(object = gsea_res, file = paste0(
+  "./results/", project_name, "_GSEA_results_", Sys.Date(), ".rds"))
+```
+
+*Session Info*
+
+```{r sessionInfo}
+sessionInfo()
+```
